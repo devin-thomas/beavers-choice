@@ -276,6 +276,8 @@ def strip_order_tail(request_text: str) -> str:
     markers = [
         "I need these supplies delivered",
         "We need these supplies delivered",
+        "I need these items delivered",
+        "We need these items delivered",
         "Please ensure delivery",
         "Please deliver these supplies",
         "Please deliver the supplies",
@@ -284,8 +286,6 @@ def strip_order_tail(request_text: str) -> str:
         "The supplies must be delivered",
         "I need the order delivered",
         "We need the supplies delivered",
-        "I need these items delivered",
-        "I need these supplies delivered",
     ]
     lowered = request_text.lower()
     cut_positions = [lowered.find(marker.lower()) for marker in markers if lowered.find(marker.lower()) != -1]
@@ -294,12 +294,27 @@ def strip_order_tail(request_text: str) -> str:
     return request_text
 
 
+def prepare_request_text(request_text: str) -> str:
+    """Normalize request text before extracting quantity/item pairs."""
+    text_value = strip_order_tail(request_text)
+    text_value = re.sub(r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b", " ", text_value, flags=re.IGNORECASE)
+    text_value = re.sub(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", " ", text_value)
+    text_value = text_value.replace("\n", " ")
+    text_value = re.sub(r"\s+-\s+", ", ", text_value)
+    text_value = re.sub(r"\b(along with|as well as)\b", ", ", text_value, flags=re.IGNORECASE)
+    text_value = re.sub(r"\s+and\s+(?=\d[\d,]*\s)", ", ", text_value, flags=re.IGNORECASE)
+    text_value = re.sub(r"\b(high-quality|high quality|sturdy)\s*,\s*", r"\1 ", text_value, flags=re.IGNORECASE)
+    text_value = re.sub(r"8\s*\.\s*5\s*(?:\"+|inches|inch|in)?\s*x\s*11\s*(?:\"+|inches|inch|in)?", "letter-sized", text_value, flags=re.IGNORECASE)
+    return text_value
+
+
 def clean_item_phrase(raw_item: str) -> str:
     cleaned = raw_item.lower()
     cleaned = cleaned.replace('"', " ").replace("'", " ")
-    cleaned = re.sub(r"\([^)]*(white|assorted|biodegradable|colors?)\)", " ", cleaned)
-    cleaned = re.sub(r"\b(high quality|high-quality|sturdy|various colors|assorted colors|assorted|white|colorful|coloured|colored|in various colors|in assorted colors)\b", " ", cleaned)
-    cleaned = re.sub(r"\b(for|by|to)\b.*$", " ", cleaned)
+    cleaned = re.sub(r"^\s*(?:sheets?|rolls?|reams?|packets?|packet|units?|unit)\s+(?:of\s+)?", " ", cleaned)
+    cleaned = re.sub(r"\([^)]*(?:white|assorted|biodegradable|colors?|inches?)\)", " ", cleaned)
+    cleaned = re.sub(r"\b(?:high quality|high-quality|sturdy|various colors|assorted colors|assorted|white|biodegradable|size)\b", " ", cleaned)
+    cleaned = re.sub(r"\b(?:for|by|to)\b.*$", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
 
@@ -322,10 +337,10 @@ def resolve_item_name(raw_name: str) -> Optional[str]:
         return "Poster paper"
     if "streamer" in cleaned:
         return "Party streamers"
-    if "paper cup" in cleaned or cleaned == "cups":
-        return "Paper cups"
     if "disposable cup" in cleaned:
         return "Disposable cups"
+    if "paper cup" in cleaned or cleaned == "cups":
+        return "Paper cups"
     if "paper plate" in cleaned or cleaned == "plates":
         return "Paper plates"
     if "napkin" in cleaned:
@@ -360,22 +375,28 @@ def resolve_item_name(raw_name: str) -> Optional[str]:
         return "Colored paper"
     if "a5" in cleaned and "colored" in cleaned:
         return "Colored paper"
+    if "letter sized" in cleaned and "colored" in cleaned:
+        return "Colored paper"
     if "glossy" in cleaned:
         return "Glossy paper"
     if "matte" in cleaned:
         return "Matte paper"
-    if "recycled" in cleaned:
+    if "recycled" in cleaned and "cardstock" not in cleaned:
         return "Recycled paper"
-    if "colored" in cleaned or "bright" in cleaned:
+    if "colored" in cleaned or "bright" in cleaned or "colorful" in cleaned:
+        if "poster" in cleaned:
+            return "Poster paper"
+        if "construction" in cleaned:
+            return "Construction paper"
         return "Colored paper"
     if "heavyweight" in cleaned:
         return "Heavyweight paper"
-    if cleaned in {normalize_text(name) for name in CATALOG_NAMES}:
-        for name in CATALOG_NAMES:
-            if cleaned == normalize_text(name):
-                return name
 
-    matches = get_close_matches(raw_name, CATALOG_NAMES, n=1, cutoff=0.78)
+    normalized_catalog = {normalize_text(name): name for name in CATALOG_NAMES}
+    if cleaned in normalized_catalog:
+        return normalized_catalog[cleaned]
+
+    matches = get_close_matches(raw_name, CATALOG_NAMES, n=1, cutoff=0.82)
     return matches[0] if matches else None
 
 
@@ -395,14 +416,10 @@ def calculate_discount(quantity: int) -> float:
 
 def extract_requested_line_items(request_text: str) -> List[Dict[str, Union[str, int, None]]]:
     """Extract quantity/item pairs and preserve unmatched items for explicit reporting."""
-    text_value = strip_order_tail(request_text)
-    text_value = text_value.replace("\n", " ")
-    text_value = re.sub(r"\s+-\s+", ", ", text_value)
-    text_value = re.sub(r"\s+and\s+(?=\d[\d,]*\s)", ", ", text_value, flags=re.IGNORECASE)
-
+    text_value = prepare_request_text(request_text)
     pattern = re.compile(
         r"(?P<qty>\d[\d,]*)\s+"
-        r"(?:(?P<unit>sheets?|rolls?|reams?|packets?|packet|poster boards?|poster board|flyers?|posters?|tickets?|paper cups?|paper plates?|table napkins?|paper napkins?)\s*(?:of)?\s*)?"
+        r"(?:(?P<measure>sheets?|rolls?|roll|reams?|ream|packets?|packet|units?|unit)\s+(?:of\s+)?)?"
         r"(?P<item>[^,\.]+)",
         flags=re.IGNORECASE,
     )
@@ -410,9 +427,9 @@ def extract_requested_line_items(request_text: str) -> List[Dict[str, Union[str,
     line_items: List[Dict[str, Union[str, int, None]]] = []
     for match in pattern.finditer(text_value):
         quantity = int(match.group("qty").replace(",", ""))
-        unit = (match.group("unit") or "").strip()
+        measure = (match.group("measure") or "").strip()
         item = (match.group("item") or "").strip()
-        raw_phrase = f"{unit} {item}".strip()
+        raw_phrase = f"{measure} {item}".strip()
         cleaned_phrase = clean_item_phrase(raw_phrase)
         item_name = resolve_item_name(cleaned_phrase)
         line_items.append({
