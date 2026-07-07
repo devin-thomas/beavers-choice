@@ -588,32 +588,200 @@ def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
 ########################
 ########################
 
+import os
+import json
+from dotenv import load_dotenv
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.models.openai import OpenAIChatModel
 
 # Set up and load your env parameters and instantiate your model.
-
-
-"""Set up tools for your agents to use, these should be methods that combine the database functions above
- and apply criteria to them to ensure that the flow of the system is correct."""
-
-
-# Tools for inventory agent
-
-
-# Tools for quoting agent
-
-
-# Tools for ordering agent
-
+load_dotenv()
+os.environ["OPENAI_API_KEY"] = os.getenv("UDACITY_OPENAI_API_KEY", "")
+os.environ["OPENAI_BASE_URL"] = "https://openai.vocareum.com/v1"
+model = OpenAIChatModel('gpt-4o-mini')
 
 # Set up your agents and create an orchestration agent that will manage them.
 
+inventory_agent = Agent(
+    model=model,
+    system_prompt=(
+        "You are the Inventory Agent. "
+        "Your job is to answer questions about inventory, check stock levels, and place reorder transactions when stock is low. "
+        "You always use the provided date from the user query as the 'as_of_date' when calling tools."
+    )
+)
+
+@inventory_agent.tool
+def tool_check_inventory(ctx: RunContext[None], as_of_date: str) -> str:
+    """Return full stock snapshot as a formatted string."""
+    stock = get_all_inventory(as_of_date)
+    return str(stock)
+
+@inventory_agent.tool
+def tool_check_stock_level(ctx: RunContext[None], item_name: str, as_of_date: str) -> str:
+    """Return quantity available for a single item. Will return a summary if item exists."""
+    df = get_stock_level(item_name, as_of_date)
+    if df.empty:
+        return f"Item '{item_name}' not found in inventory."
+    qty = df.iloc[0]['current_stock']
+    return f"Stock for {item_name}: {qty}"
+
+@inventory_agent.tool
+def tool_reorder_stock(ctx: RunContext[None], item_name: str, qty: int, as_of_date: str) -> str:
+    """Place a stock order and return delivery ETA."""
+    try:
+        # Get item price from paper_supplies list
+        unit_price = 0.0
+        for item in paper_supplies:
+            if item['item_name'].lower() == item_name.lower():
+                unit_price = item['unit_price']
+                break
+        create_transaction(item_name, 'purchase', qty, unit_price, as_of_date)
+        eta = get_supplier_delivery_date(as_of_date, qty)
+        return f"Reordered {qty} of {item_name}. Estimated delivery date: {eta}"
+    except Exception as e:
+        return str(e)
+
+quoting_agent = Agent(
+    model=model,
+    system_prompt=(
+        "You are the Quoting Agent. "
+        "Your job is to generate quotes for customer requests by looking up past quotes and calculating prices. "
+        "When calculating prices for paper products, apply these bulk discounts: "
+        "0-99 units -> 0% discount, 100-499 units -> 5% discount, 500-999 units -> 10% discount, 1000+ units -> 15% discount. "
+        "You also check if we have sufficient stock for the requested items and sufficient cash for processing."
+    )
+)
+
+@quoting_agent.tool
+def tool_search_quotes(ctx: RunContext[None], keywords: list[str]) -> str:
+    """Find similar past quotes for pricing reference."""
+    res = search_quote_history(keywords, limit=3)
+    return str(res)
+
+@quoting_agent.tool
+def tool_generate_quote(ctx: RunContext[None], items: str, date: str) -> str:
+    """Build a quote. The items should be a JSON string like '{"A4 paper": 200}'."""
+    try:
+        items_dict = json.loads(items)
+    except:
+        return "Failed to parse items json."
+        
+    cash = get_cash_balance(date)
+    response_lines = [f"Cash Balance: ${cash:.2f}"]
+    total_cost = 0.0
+    
+    for item_name, qty in items_dict.items():
+        df = get_stock_level(item_name, date)
+        if df.empty:
+            response_lines.append(f"- {item_name}: Not carried.")
+            continue
+            
+        unit_price = 0.0
+        for item in paper_supplies:
+            if item['item_name'].lower() == item_name.lower():
+                unit_price = item['unit_price']
+                break
+                
+        stock = df.iloc[0]['current_stock']
+        
+        if stock < qty:
+            response_lines.append(f"- {item_name}: Insufficient stock. Requested {qty}, have {stock}.")
+            continue
+            
+        discount = 0.0
+        if qty >= 1000: discount = 0.15
+        elif qty >= 500: discount = 0.10
+        elif qty >= 100: discount = 0.05
+        
+        final_price = unit_price * (1 - discount)
+        cost = final_price * qty
+        total_cost += cost
+        response_lines.append(f"- {item_name}: {qty} units at ${final_price:.2f} (base ${unit_price:.2f}, {(discount*100):.0f}% discount) = ${cost:.2f}")
+        
+    response_lines.append(f"Total Quote: ${total_cost:.2f}")
+    return "\n".join(response_lines)
+
+sales_agent = Agent(
+    model=model,
+    system_prompt=(
+        "You are the Sales Agent. "
+        "Your job is to finalize sales by recording a 'sales' transaction. "
+        "Always verify stock levels first. Return the estimated delivery date if requested."
+    )
+)
+
+@sales_agent.tool
+def tool_finalize_sale(ctx: RunContext[None], item_name: str, qty: int, date: str) -> str:
+    """Verify stock, record sale, return delivery date."""
+    df = get_stock_level(item_name, date)
+    if df.empty:
+        return f"Item '{item_name}' not found."
+        
+    stock = df.iloc[0]['current_stock']
+    if stock < qty:
+        return f"Insufficient stock for {item_name}. Have {stock}, requested {qty}."
+        
+    unit_price = 0.0
+    for item in paper_supplies:
+        if item['item_name'].lower() == item_name.lower():
+            unit_price = item['unit_price']
+            break
+            
+    discount = 0.0
+    if qty >= 1000: discount = 0.15
+    elif qty >= 500: discount = 0.10
+    elif qty >= 100: discount = 0.05
+    final_price = unit_price * (1 - discount)
+    
+    try:
+        create_transaction(item_name, 'sales', qty, final_price, date)
+        eta = get_supplier_delivery_date(date, qty)
+        return f"Sale finalized for {qty} {item_name} at ${final_price:.2f} each. ETA to customer: {eta}"
+    except Exception as e:
+        return str(e)
+        
+@sales_agent.tool
+def tool_financial_report(ctx: RunContext[None], date: str) -> str:
+    """Summarize current financial health."""
+    return str(generate_financial_report(date))
+    
+orchestrator = Agent(
+    model=model,
+    system_prompt=(
+        "You are the Orchestrator for Beaver's Choice Paper Company. "
+        "You receive customer requests and coordinate with the Inventory, Quoting, and Sales Agents to fulfill them. "
+        "Always read the date from the customer request and pass it down to your agents. "
+        "If a customer asks about stock, use the Inventory Agent. "
+        "If they ask for a quote or pricing, use the Quoting Agent. "
+        "If they are placing a firm order, use the Sales Agent to finalize the sale. "
+        "If they request items that we don't have enough stock for, explain that we have insufficient stock. "
+        "Never expose internal margins, PII, or exact cash balances to the customer. "
+        "Keep the final response polite, helpful, and customer-facing."
+    )
+)
+
+@orchestrator.tool
+def call_inventory_agent(ctx: RunContext[None], query: str) -> str:
+    """Call the Inventory Agent to check or reorder stock. Pass the query and the relevant date."""
+    return str(inventory_agent.run_sync(query).output)
+
+@orchestrator.tool
+def call_quoting_agent(ctx: RunContext[None], query: str) -> str:
+    """Call the Quoting Agent to generate quotes or find past quotes. Pass the query and the date."""
+    return str(quoting_agent.run_sync(query).output)
+
+@orchestrator.tool
+def call_sales_agent(ctx: RunContext[None], query: str) -> str:
+    """Call the Sales Agent to finalize a sale or check finances. Pass the query and the date."""
+    return str(sales_agent.run_sync(query).output)
 
 # Run your test scenarios by writing them here. Make sure to keep track of them.
 
 def run_test_scenarios():
     
     print("Initializing Database...")
-    init_database()
+    init_database(db_engine)
     try:
         quote_requests_sample = pd.read_csv("quote_requests_sample.csv")
         quote_requests_sample["request_date"] = pd.to_datetime(
@@ -660,7 +828,8 @@ def run_test_scenarios():
         ############
         ############
 
-        # response = call_your_multi_agent_system(request_with_date)
+        result = orchestrator.run_sync(request_with_date)
+        response = result.output
 
         # Update state
         report = generate_financial_report(request_date)
