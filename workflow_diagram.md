@@ -1,70 +1,73 @@
-# Beaver's Choice Multi-Agent Workflow Diagram
+# Beaver's Choice PydanticAI Multi-Agent Workflow
 
-This diagram describes the submitted multi-agent architecture. The runnable evaluation path is deterministic for reliability, while `framework_agents.py` documents the optional PydanticAI bindings for the same agents and tools.
+The submitted workflow uses the selected `pydantic-ai` framework in the runnable `project_starter_update.py` path. The architecture stays within the five-agent project limit by using `OrchestratorAgent`, `IntakeAgent`, `InventoryAgent`, `QuotingAgent`, and `SalesAgent`. Evaluation is handled by an Orchestrator-owned tool rather than by a sixth agent.
 
 ```mermaid
 flowchart TD
-    A[Customer quote/order request] --> B[Orchestrator Agent]
-    B --> C[Intake Agent]
-    C --> C1[Parse requested items]
-    C --> C2[Parse request date and delivery deadline]
+    A[Customer quote/order request] --> B[OrchestratorAgent]
+    B --> B1[Tool: workflow_plan]
+    B1 --> S[Shared typed workflow state]
 
-    B --> D[Inventory Agent]
-    D --> D1[get_all_inventory]
-    D --> D2[get_stock_level]
-    D --> D3[get_supplier_delivery_date]
-    D --> D4[InventoryDecision: in stock, reorderable, late, or not carried]
+    S --> I[IntakeAgent]
+    I --> I1[Tool: parse_delivery_date -> parse_requested_delivery_date]
+    I --> I2[Tool: extract_line_items -> extract_requested_line_items]
+    I --> I3[Tool: classify_firm_order -> is_firm_order_request]
+    I --> I4[Tool: resolve_catalog_item -> resolve_item_name]
+    I --> I5[IntakeResult]
 
-    B --> E[Quoting Agent]
-    E --> E1[search_quote_history]
-    E --> E2[Apply quantity discount rules]
-    E --> E3[Build customer-facing QuoteLine records]
+    I5 --> C[InventoryAgent]
+    C --> C1[Tool: inventory_snapshot -> get_all_inventory]
+    C --> C2[Tool: item_stock_level -> get_stock_level]
+    C --> C3[Tool: supplier_delivery_eta -> get_supplier_delivery_date]
+    C --> C4[InventoryResult with InventoryAssessment records]
 
-    B --> F[Sales Agent]
-    F --> F1[create_transaction: stock_orders when reorder is needed]
-    F --> F2[create_transaction: sales when order is fulfillable]
-    F --> F3[get_cash_balance]
-    F --> F4[generate_financial_report]
+    C4 --> D[QuotingAgent]
+    D --> D1[Tool: quote_history_search -> search_quote_history]
+    D --> D2[Tool: catalog_unit_price -> catalog price lookup]
+    D --> D3[Tool: volume_discount -> calculate_discount]
+    D --> D4[QuoteResult with line prices, discounts, and delivery rationale]
 
-    F --> G[test_results.csv]
-    G --> H[Evaluation summary: cash changes, fulfilled requests, unfulfilled reasons]
+    D4 --> E[SalesAgent]
+    E --> E1[Tool: record_transaction_once -> create_transaction]
+    E --> E2[Tool: wholesale_restock_cost -> get_wholesale_cost]
+    E --> E3[Tool: cash_balance -> get_cash_balance]
+    E --> E4[Tool: financial_report -> generate_financial_report]
+    E --> E5[SalesResult]
+
+    E5 --> F[OrchestratorAgent final response]
+    F --> F1[Tool: response_quality_check]
+    F1 --> G[Customer-safe response]
+    G --> H[test_results.csv with route, tools, status, cash delta, fulfilled items, unfulfilled reasons, response]
 ```
 
-## Agent responsibilities
+## Agent Responsibilities
 
-### Orchestrator Agent
+### OrchestratorAgent
 
-The Orchestrator Agent coordinates the workflow. It receives each customer request, delegates parsing to the Intake Agent, sends structured line items to the Inventory Agent, sends fulfillable inventory decisions to the Quoting Agent, and asks the Sales Agent to record only fully fulfillable firm orders.
+The OrchestratorAgent owns the request lifecycle and framework-level coordination. It creates a workflow plan, delegates to the worker agents, synthesizes the final customer response, and uses its `response_quality_check` tool as the final evaluation gate. It does not perform inventory math, quote math, or direct transaction mutation.
 
-### Intake Agent
+### IntakeAgent
 
-The Intake Agent extracts structured `RequestItem` records from natural-language requests and identifies the requested delivery deadline. It does not check inventory, generate prices, or record transactions.
+The IntakeAgent owns structured request extraction. Its tools parse requested delivery date, extract requested line items, classify whether the request is a firm order, and resolve raw item phrases to catalog item names.
 
-### Inventory Agent
+### InventoryAgent
 
-The Inventory Agent checks stock and decides whether missing stock can be reordered in time. It uses:
+The InventoryAgent owns stock and delivery feasibility. It is read-only except for its structured `InventoryResult`. Its tools are `inventory_snapshot`, `item_stock_level`, and `supplier_delivery_eta`, which call the starter helpers `get_all_inventory`, `get_stock_level`, and `get_supplier_delivery_date`.
 
-- `get_all_inventory` to inspect available inventory;
-- `get_stock_level` to check one item;
-- `get_supplier_delivery_date` to decide whether reorder can meet the customer's requested delivery date.
+### QuotingAgent
 
-### Quoting Agent
+The QuotingAgent owns price construction and historical quote context. Its tools call `search_quote_history`, catalog unit-price lookup, and the discount calculator. It does not update inventory or record sales.
 
-The Quoting Agent calculates customer-facing prices, applies bulk discounts, and builds quote lines. It uses `search_quote_history` as a historical pricing/context tool and keeps pricing logic separate from inventory mutation.
+### SalesAgent
 
-### Sales Agent
+The SalesAgent is the only worker allowed to mutate business state. It records restock and sale transactions only when the order is firm and fully fulfillable. Its tools call `create_transaction`, `get_cash_balance`, and `generate_financial_report`, with `record_transaction_once` used to reduce duplicate transaction risk.
 
-The Sales Agent records transactions only after the Orchestrator confirms the request is a firm order and all requested catalog items can be fulfilled. It uses:
+## Data Flow
 
-- `create_transaction` for restocks and sales;
-- `get_cash_balance` to confirm cash changes;
-- `generate_financial_report` to report updated business state.
-
-## Data flow
-
-1. Customer request enters the Orchestrator.
-2. Intake Agent converts the request into structured line items.
-3. Inventory Agent checks current stock and reorder feasibility.
-4. Quoting Agent calculates customer-facing quote lines.
-5. Sales Agent records transactions for fully fulfillable firm orders.
-6. The final response and financial state are written to `test_results.csv`.
+1. The OrchestratorAgent receives a customer request and creates a route plan.
+2. The IntakeAgent converts raw text into typed request state.
+3. The InventoryAgent checks current stock and supplier delivery timing.
+4. The QuotingAgent prices fulfillable items and applies quantity discounts.
+5. The SalesAgent records transactions only for firm, fully fulfillable orders.
+6. The OrchestratorAgent writes and evaluates the customer-facing response.
+7. The workflow writes `test_results.csv` with the agent route, tool-call audit, order status, cash deltas, fulfilled items, unfulfilled reasons, evaluation result, and response.
