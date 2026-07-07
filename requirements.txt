@@ -1,5 +1,12 @@
-pandas==2.2.3
-openai==1.76.0
-SQLAlchemy==2.0.40
-python-dotenv==1.1.0
-pydantic-ai
+# Runtime dependencies for project_starter.py
+# Keep this lightweight so the default evaluation path installs quickly.
+numpy>=2.2
+pandas>=2.3
+SQLAlchemy>=2.0.40
+python-dotenv>=1.1.0
+
+# Optional demo only:
+# framework_agents.py shows PydanticAI tool bindings for the rubric architecture,
+# but project_starter.py does not need PydanticAI to run the evaluation.
+# Install manually only if you want to experiment with those optional bindings:
+# python -m pip install "pydantic-ai-slim[openai]"
