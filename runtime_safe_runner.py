@@ -3,7 +3,7 @@ import re
 import time
 from datetime import datetime, timedelta
 from difflib import get_close_matches
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -13,44 +13,71 @@ from sqlalchemy.sql import text
 
 db_engine = create_engine("sqlite:///munder_difflin.db")
 
+# Full project catalog. Prices are per sheet/unit unless the item name says otherwise.
 paper_supplies = [
     {"item_name": "A4 paper", "category": "paper", "unit_price": 0.05},
     {"item_name": "Letter-sized paper", "category": "paper", "unit_price": 0.06},
     {"item_name": "Cardstock", "category": "paper", "unit_price": 0.15},
     {"item_name": "Colored paper", "category": "paper", "unit_price": 0.10},
     {"item_name": "Glossy paper", "category": "paper", "unit_price": 0.20},
+    {"item_name": "Matte paper", "category": "paper", "unit_price": 0.18},
+    {"item_name": "Recycled paper", "category": "paper", "unit_price": 0.08},
+    {"item_name": "Eco-friendly paper", "category": "paper", "unit_price": 0.12},
     {"item_name": "Poster paper", "category": "paper", "unit_price": 0.25},
+    {"item_name": "Banner paper", "category": "paper", "unit_price": 0.30},
+    {"item_name": "Kraft paper", "category": "paper", "unit_price": 0.10},
+    {"item_name": "Construction paper", "category": "paper", "unit_price": 0.07},
+    {"item_name": "Wrapping paper", "category": "paper", "unit_price": 0.15},
+    {"item_name": "Glitter paper", "category": "paper", "unit_price": 0.22},
+    {"item_name": "Decorative paper", "category": "paper", "unit_price": 0.18},
+    {"item_name": "Letterhead paper", "category": "paper", "unit_price": 0.12},
+    {"item_name": "Legal-size paper", "category": "paper", "unit_price": 0.08},
+    {"item_name": "Crepe paper", "category": "paper", "unit_price": 0.05},
+    {"item_name": "Photo paper", "category": "paper", "unit_price": 0.25},
+    {"item_name": "Uncoated paper", "category": "paper", "unit_price": 0.06},
+    {"item_name": "Butcher paper", "category": "paper", "unit_price": 0.10},
     {"item_name": "Heavyweight paper", "category": "paper", "unit_price": 0.20},
     {"item_name": "Standard copy paper", "category": "paper", "unit_price": 0.04},
+    {"item_name": "Bright-colored paper", "category": "paper", "unit_price": 0.12},
+    {"item_name": "Patterned paper", "category": "paper", "unit_price": 0.15},
+    {"item_name": "Paper plates", "category": "product", "unit_price": 0.10},
+    {"item_name": "Paper cups", "category": "product", "unit_price": 0.08},
+    {"item_name": "Paper napkins", "category": "product", "unit_price": 0.02},
+    {"item_name": "Disposable cups", "category": "product", "unit_price": 0.10},
+    {"item_name": "Table covers", "category": "product", "unit_price": 1.50},
+    {"item_name": "Envelopes", "category": "product", "unit_price": 0.05},
+    {"item_name": "Sticky notes", "category": "product", "unit_price": 0.03},
+    {"item_name": "Notepads", "category": "product", "unit_price": 2.00},
+    {"item_name": "Invitation cards", "category": "product", "unit_price": 0.50},
+    {"item_name": "Flyers", "category": "product", "unit_price": 0.15},
     {"item_name": "Party streamers", "category": "product", "unit_price": 0.05},
+    {"item_name": "Decorative adhesive tape (washi tape)", "category": "product", "unit_price": 0.20},
+    {"item_name": "Paper party bags", "category": "product", "unit_price": 0.25},
+    {"item_name": "Name tags with lanyards", "category": "product", "unit_price": 0.75},
+    {"item_name": "Presentation folders", "category": "product", "unit_price": 0.50},
     {"item_name": "Large poster paper (24x36 inches)", "category": "large_format", "unit_price": 1.00},
+    {"item_name": "Rolls of banner paper (36-inch width)", "category": "large_format", "unit_price": 2.50},
+    {"item_name": "100 lb cover stock", "category": "specialty", "unit_price": 0.50},
+    {"item_name": "80 lb text paper", "category": "specialty", "unit_price": 0.40},
+    {"item_name": "250 gsm cardstock", "category": "specialty", "unit_price": 0.30},
+    {"item_name": "220 gsm poster paper", "category": "specialty", "unit_price": 0.35},
 ]
 
 ITEM_LOOKUP = {item["item_name"].lower(): item for item in paper_supplies}
-ALIASES = {
-    "a4 glossy paper": "Glossy paper",
-    "glossy paper": "Glossy paper",
-    "heavy cardstock": "Cardstock",
-    "heavy cardstock white": "Cardstock",
-    "cardstock": "Cardstock",
-    "colored paper": "Colored paper",
-    "colorful poster paper": "Poster paper",
-    "poster paper": "Poster paper",
-    "streamers": "Party streamers",
-    "roll of streamers": "Party streamers",
-    "rolls of streamers": "Party streamers",
-    "printer paper": "Standard copy paper",
-    "copy paper": "Standard copy paper",
-    "a4 paper": "A4 paper",
-    "a3 paper": "A4 paper",
-}
+CATALOG_NAMES = [item["item_name"] for item in paper_supplies]
 
 
-def generate_sample_inventory(supplies: list, seed: int = 137) -> pd.DataFrame:
-    """Generate deterministic starting inventory for the runtime-safe runner."""
+def generate_sample_inventory(supplies: list, coverage: float = 0.4, seed: int = 137) -> pd.DataFrame:
+    """Generate the original assignment-style random inventory subset."""
     np.random.seed(seed)
+    selected_indices = np.random.choice(
+        range(len(supplies)),
+        size=int(len(supplies) * coverage),
+        replace=False,
+    )
     rows = []
-    for item in supplies:
+    for index in selected_indices:
+        item = supplies[index]
         rows.append({
             "item_name": item["item_name"],
             "category": item["category"],
@@ -143,6 +170,13 @@ def get_stock_level(item_name: str, as_of_date: Union[str, datetime]) -> pd.Data
     return pd.read_sql(query, db_engine, params={"item_name": item_name, "as_of_date": as_of_date})
 
 
+def get_stock_quantity(item_name: str, as_of_date: str) -> int:
+    df = get_stock_level(item_name, as_of_date)
+    if df.empty:
+        return 0
+    return int(df.iloc[0]["current_stock"] or 0)
+
+
 def get_all_inventory(as_of_date: str) -> Dict[str, int]:
     query = """
         SELECT item_name,
@@ -192,10 +226,24 @@ def generate_financial_report(as_of_date: Union[str, datetime]) -> Dict:
     cash = get_cash_balance(as_of_date)
     inventory_df = pd.read_sql("SELECT * FROM inventory", db_engine)
     inventory_value = 0.0
+    inventory_summary = []
     for _, item in inventory_df.iterrows():
-        stock = get_stock_level(item["item_name"], as_of_date)["current_stock"].iloc[0]
-        inventory_value += stock * item["unit_price"]
-    return {"as_of_date": as_of_date, "cash_balance": cash, "inventory_value": inventory_value, "total_assets": cash + inventory_value}
+        stock = get_stock_quantity(item["item_name"], as_of_date)
+        value = stock * item["unit_price"]
+        inventory_value += value
+        inventory_summary.append({
+            "item_name": item["item_name"],
+            "stock": stock,
+            "unit_price": item["unit_price"],
+            "value": value,
+        })
+    return {
+        "as_of_date": as_of_date,
+        "cash_balance": cash,
+        "inventory_value": inventory_value,
+        "total_assets": cash + inventory_value,
+        "inventory_summary": inventory_summary,
+    }
 
 
 def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
@@ -223,14 +271,111 @@ def normalize_text(value: str) -> str:
     return re.sub(r"[^a-z0-9 ]+", " ", value.lower()).strip()
 
 
-def resolve_item_name(raw_name: str) -> str | None:
+def strip_order_tail(request_text: str) -> str:
+    """Remove delivery-only sentences so they do not get parsed as item names."""
+    markers = [
+        "I need these supplies delivered",
+        "We need these supplies delivered",
+        "Please ensure delivery",
+        "Please deliver these supplies",
+        "Please deliver the supplies",
+        "Please deliver",
+        "The supplies are needed",
+        "The supplies must be delivered",
+        "I need the order delivered",
+        "We need the supplies delivered",
+        "I need these items delivered",
+        "I need these supplies delivered",
+    ]
+    lowered = request_text.lower()
+    cut_positions = [lowered.find(marker.lower()) for marker in markers if lowered.find(marker.lower()) != -1]
+    if cut_positions:
+        return request_text[: min(cut_positions)]
+    return request_text
+
+
+def clean_item_phrase(raw_item: str) -> str:
+    cleaned = raw_item.lower()
+    cleaned = cleaned.replace('"', " ").replace("'", " ")
+    cleaned = re.sub(r"\([^)]*(white|assorted|biodegradable|colors?)\)", " ", cleaned)
+    cleaned = re.sub(r"\b(high quality|high-quality|sturdy|various colors|assorted colors|assorted|white|colorful|coloured|colored|in various colors|in assorted colors)\b", " ", cleaned)
+    cleaned = re.sub(r"\b(for|by|to)\b.*$", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def resolve_item_name(raw_name: str) -> Optional[str]:
+    """Map customer wording to the closest catalog item without inventing unsupported sizes."""
     cleaned = normalize_text(raw_name)
-    if cleaned in ALIASES:
-        return ALIASES[cleaned]
-    for alias, canonical in ALIASES.items():
-        if alias in cleaned or cleaned in alias:
-            return canonical
-    matches = get_close_matches(raw_name, [item["item_name"] for item in paper_supplies], n=1, cutoff=0.55)
+
+    if not cleaned:
+        return None
+    if any(word in cleaned for word in ["balloon", "ticket", "cardboard"]):
+        return None
+    if "washi" in cleaned or "decorative adhesive tape" in cleaned:
+        return "Decorative adhesive tape (washi tape)"
+    if "poster board" in cleaned or ("poster" in cleaned and "24" in cleaned and "36" in cleaned):
+        return "Large poster paper (24x36 inches)"
+    if cleaned in {"flyer", "flyers"}:
+        return "Flyers"
+    if cleaned in {"poster", "posters"} or "poster paper" in cleaned:
+        return "Poster paper"
+    if "streamer" in cleaned:
+        return "Party streamers"
+    if "paper cup" in cleaned or cleaned == "cups":
+        return "Paper cups"
+    if "disposable cup" in cleaned:
+        return "Disposable cups"
+    if "paper plate" in cleaned or cleaned == "plates":
+        return "Paper plates"
+    if "napkin" in cleaned:
+        return "Paper napkins"
+    if "envelope" in cleaned:
+        return "Envelopes"
+    if "cardstock" in cleaned:
+        return "Cardstock"
+    if "construction" in cleaned:
+        return "Construction paper"
+    if "kraft" in cleaned:
+        return "Kraft paper"
+    if "printer" in cleaned or "printing" in cleaned or "copy" in cleaned:
+        if "a4" in cleaned:
+            return "A4 paper"
+        return "Standard copy paper"
+    if "a4" in cleaned and "glossy" in cleaned:
+        return "Glossy paper"
+    if "a4" in cleaned and "matte" in cleaned:
+        return "Matte paper"
+    if "a4" in cleaned and "recycled" in cleaned:
+        return "Recycled paper"
+    if cleaned in {"a4 paper", "a4 white paper"}:
+        return "A4 paper"
+    if cleaned in {"a3 paper", "a3 white paper"}:
+        return None
+    if "a3" in cleaned and "glossy" in cleaned:
+        return "Glossy paper"
+    if "a3" in cleaned and "matte" in cleaned:
+        return "Matte paper"
+    if "a3" in cleaned and "colored" in cleaned:
+        return "Colored paper"
+    if "a5" in cleaned and "colored" in cleaned:
+        return "Colored paper"
+    if "glossy" in cleaned:
+        return "Glossy paper"
+    if "matte" in cleaned:
+        return "Matte paper"
+    if "recycled" in cleaned:
+        return "Recycled paper"
+    if "colored" in cleaned or "bright" in cleaned:
+        return "Colored paper"
+    if "heavyweight" in cleaned:
+        return "Heavyweight paper"
+    if cleaned in {normalize_text(name) for name in CATALOG_NAMES}:
+        for name in CATALOG_NAMES:
+            if cleaned == normalize_text(name):
+                return name
+
+    matches = get_close_matches(raw_name, CATALOG_NAMES, n=1, cutoff=0.78)
     return matches[0] if matches else None
 
 
@@ -248,57 +393,145 @@ def calculate_discount(quantity: int) -> float:
     return 0.0
 
 
-def extract_requested_items(request_text: str) -> Dict[str, int]:
-    text_value = request_text.replace("\n", " ")
-    matches = re.findall(
-        r"(\d[\d,]*)\s+(?:sheets? of |sheet of |rolls? of |roll of |reams? of |ream of |units? of )?([A-Za-z0-9\-\(\) ]+?)(?=,| and | for |\. |$)",
-        text_value,
+def extract_requested_line_items(request_text: str) -> List[Dict[str, Union[str, int, None]]]:
+    """Extract quantity/item pairs and preserve unmatched items for explicit reporting."""
+    text_value = strip_order_tail(request_text)
+    text_value = text_value.replace("\n", " ")
+    text_value = re.sub(r"\s+-\s+", ", ", text_value)
+    text_value = re.sub(r"\s+and\s+(?=\d[\d,]*\s)", ", ", text_value, flags=re.IGNORECASE)
+
+    pattern = re.compile(
+        r"(?P<qty>\d[\d,]*)\s+"
+        r"(?:(?P<unit>sheets?|rolls?|reams?|packets?|packet|poster boards?|poster board|flyers?|posters?|tickets?|paper cups?|paper plates?|table napkins?|paper napkins?)\s*(?:of)?\s*)?"
+        r"(?P<item>[^,\.]+)",
         flags=re.IGNORECASE,
     )
-    requested_items: Dict[str, int] = {}
-    for quantity_text, raw_item in matches:
-        quantity = int(quantity_text.replace(",", ""))
-        cleaned_item = raw_item.strip().lower()
-        cleaned_item = re.sub(r"\b(white|assorted colors|assorted|color|colors|the|a|an)\b", "", cleaned_item).strip()
-        cleaned_item = re.sub(r"\s+", " ", cleaned_item)
-        item_name = resolve_item_name(cleaned_item)
+
+    line_items: List[Dict[str, Union[str, int, None]]] = []
+    for match in pattern.finditer(text_value):
+        quantity = int(match.group("qty").replace(",", ""))
+        unit = (match.group("unit") or "").strip()
+        item = (match.group("item") or "").strip()
+        raw_phrase = f"{unit} {item}".strip()
+        cleaned_phrase = clean_item_phrase(raw_phrase)
+        item_name = resolve_item_name(cleaned_phrase)
+        line_items.append({
+            "quantity": quantity,
+            "raw_item": raw_phrase,
+            "cleaned_item": cleaned_phrase,
+            "item_name": item_name,
+        })
+
+    return line_items
+
+
+def consolidate_line_items(line_items: List[Dict[str, Union[str, int, None]]]) -> List[Dict[str, Union[str, int, List[str], None]]]:
+    """Merge duplicate resolved catalog items while keeping unknown items separate."""
+    consolidated: Dict[str, Dict[str, Union[str, int, List[str], None]]] = {}
+    output: List[Dict[str, Union[str, int, List[str], None]]] = []
+
+    for item in line_items:
+        item_name = item["item_name"]
+        quantity = int(item["quantity"])
+        raw_item = str(item["raw_item"])
         if item_name:
-            requested_items[item_name] = requested_items.get(item_name, 0) + quantity
-    return requested_items
+            key = str(item_name)
+            if key not in consolidated:
+                consolidated[key] = {"item_name": key, "quantity": 0, "raw_items": []}
+                output.append(consolidated[key])
+            consolidated[key]["quantity"] = int(consolidated[key]["quantity"]) + quantity
+            consolidated[key]["raw_items"].append(raw_item)
+        else:
+            output.append({"item_name": None, "quantity": quantity, "raw_items": [raw_item]})
+
+    return output
 
 
-def generate_quote_response(items: Dict[str, int], date: str, finalize_sale: bool = False) -> str:
-    if not items:
+def is_firm_order_request(request_text: str) -> bool:
+    lower_request = request_text.lower()
+    return any(phrase in lower_request for phrase in [
+        "place an order",
+        "need to order",
+        "confirm the order",
+        "large order",
+        "medium order",
+        "small order",
+    ])
+
+
+def generate_quote_response(line_items: List[Dict[str, Union[str, int, List[str], None]]], date: str, finalize_sale: bool = False) -> str:
+    """Generate a customer-facing quote. Do not record partial sales for incomplete orders."""
+    if not line_items:
         inventory = get_all_inventory(date)
-        return "Thanks for the request. I could not confidently match the request to our catalog. Available examples: " + ", ".join(list(inventory.keys())[:8])
+        examples = ", ".join(list(inventory.keys())[:8])
+        return f"Thanks for the request. I could not identify quantity/item pairs clearly enough to quote it. Available examples: {examples}."
 
-    response_lines = []
-    total_quote = 0.0
-    for item_name, quantity in items.items():
-        stock = int(get_stock_level(item_name, date)["current_stock"].iloc[0])
-        unit_price = get_unit_price(item_name)
+    response_lines: List[str] = []
+    available_lines: List[Dict[str, Union[str, int, float]]] = []
+    has_issue = False
+
+    for line_item in line_items:
+        item_name = line_item["item_name"]
+        quantity = int(line_item["quantity"])
+        raw_label = ", ".join(line_item["raw_items"])
+
+        if not item_name:
+            has_issue = True
+            response_lines.append(f"- {raw_label}: not carried in the current catalog.")
+            continue
+
+        stock = get_stock_quantity(str(item_name), date)
+        unit_price = get_unit_price(str(item_name))
         discount = calculate_discount(quantity)
         final_unit_price = unit_price * (1 - discount)
         line_total = final_unit_price * quantity
         eta = get_supplier_delivery_date(date, quantity)
+
         if stock < quantity:
+            has_issue = True
             response_lines.append(f"- {item_name}: requested {quantity}, but only {stock} are available as of {date}.")
             continue
-        total_quote += line_total
-        response_lines.append(f"- {item_name}: {quantity} units at ${final_unit_price:.2f} each ({discount * 100:.0f}% discount) = ${line_total:.2f}; estimated delivery {eta}.")
-        if finalize_sale:
-            create_transaction(item_name, "sales", quantity, line_total, date)
-    if total_quote > 0:
-        response_lines.append(f"{'Order total' if finalize_sale else 'Estimated quote'}: ${total_quote:.2f}")
-        response_lines.append("The sale has been recorded." if finalize_sale else "Please confirm if you would like to place this order.")
+
+        available_lines.append({
+            "item_name": str(item_name),
+            "quantity": quantity,
+            "line_total": line_total,
+        })
+        response_lines.append(
+            f"- {item_name}: {quantity} units at ${final_unit_price:.2f} each "
+            f"({discount * 100:.0f}% discount) = ${line_total:.2f}; estimated delivery {eta}."
+        )
+
+    available_total = sum(float(line["line_total"]) for line in available_lines)
+
+    if finalize_sale and not has_issue and available_lines:
+        for line in available_lines:
+            create_transaction(str(line["item_name"]), "sales", int(line["quantity"]), float(line["line_total"]), date)
+        response_lines.append(f"Order total: ${available_total:.2f}")
+        response_lines.append("The full order has been recorded.")
+    elif finalize_sale and has_issue:
+        if available_total > 0:
+            response_lines.append(f"Available line-item subtotal: ${available_total:.2f}")
+        response_lines.append("The full order cannot be fulfilled as requested, so no sale has been recorded.")
+    elif available_total > 0:
+        label = "Available line-item quote" if has_issue else "Estimated quote"
+        response_lines.append(f"{label}: ${available_total:.2f}")
+        if has_issue:
+            response_lines.append("Please review the unavailable or non-carried items before confirming an order.")
+        else:
+            response_lines.append("Please confirm if you would like to place this order.")
+
     return "\n".join(response_lines)
 
 
 def handle_request(request_text: str, request_date: str) -> str:
-    items = extract_requested_items(request_text)
-    lower_request = request_text.lower()
-    is_firm_order = any(phrase in lower_request for phrase in ["place an order", "need to order", "confirm the order"])
-    return generate_quote_response(items, request_date, finalize_sale=is_firm_order)
+    raw_line_items = extract_requested_line_items(request_text)
+    line_items = consolidate_line_items(raw_line_items)
+    return generate_quote_response(
+        line_items,
+        request_date,
+        finalize_sale=is_firm_order_request(request_text),
+    )
 
 
 def run_test_scenarios():
@@ -320,9 +553,10 @@ def run_test_scenarios():
     current_inventory = report["inventory_value"]
 
     results = []
-    for idx, row in quote_requests_sample.iterrows():
+    for request_number, (source_index, row) in enumerate(quote_requests_sample.iterrows(), start=1):
         request_date = row["request_date"].strftime("%Y-%m-%d")
-        print(f"\n=== Request {idx + 1} ===")
+        print(f"\n=== Request {request_number} ===")
+        print(f"Source Row: {source_index + 1}")
         print(f"Context: {row['job']} organizing {row['event']}")
         print(f"Request Date: {request_date}")
         print(f"Cash Balance: ${current_cash:.2f}")
@@ -336,7 +570,14 @@ def run_test_scenarios():
         print(f"Response: {response}")
         print(f"Updated Cash: ${current_cash:.2f}")
         print(f"Updated Inventory: ${current_inventory:.2f}")
-        results.append({"request_id": idx + 1, "request_date": request_date, "cash_balance": current_cash, "inventory_value": current_inventory, "response": response})
+        results.append({
+            "request_id": request_number,
+            "source_row": source_index + 1,
+            "request_date": request_date,
+            "cash_balance": current_cash,
+            "inventory_value": current_inventory,
+            "response": response,
+        })
         time.sleep(1)
 
     final_date = quote_requests_sample["request_date"].max().strftime("%Y-%m-%d")
